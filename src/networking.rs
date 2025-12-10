@@ -3,7 +3,7 @@ use url::Url;
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use httparse::{Header, Response, Status};
-use log::info;
+use log::{debug, info};
 pub enum Method {
     Get,
     Post,
@@ -95,4 +95,56 @@ pub async fn send_http_request(method: Method, url: Url) -> Result<String, Error
         None => Err(Error::IOError(std::io::Error::new(std::io::ErrorKind::InvalidData, "No Content-Length header in response"))),
     }
 
+}
+
+pub async fn make_torrent_request(addr: &str, message_type: u8, data: Vec<u8>, socket: &mut TcpStream) -> Result<(u8, Vec<u8>), Error> {
+    send_message(socket, message_type, &data).await?;
+    debug!("Sent message type 0x{:02x} to peer at {}", message_type, addr);
+
+    //Await response header
+    let (response_type, response_data) = receive_message(socket).await?;
+    debug!("Received response type 0x{:02x} from peer at {}", response_type, addr);
+
+    Ok((response_type, response_data))
+}
+
+pub async fn receive_message(socket: &mut TcpStream) -> Result<(u8, Vec<u8>), Error> {
+  let mut response_header = [0u8; 4];
+  socket.read_exact(&mut response_header).await?;
+
+
+  //Parse response header
+  let response_version = response_header[0];
+  let response_type = response_header[1];
+  let response_len = u16::from_be_bytes([response_header[2], response_header[3]]) as usize;
+
+  if response_version != 0x01 {
+        return Err(Error::IOError(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid response version")));
+    }
+
+  //Read response data
+  let mut response_data = vec![0u8; response_len];
+  socket.read_exact(&mut response_data).await?;
+
+  Ok((response_type, response_data))
+}
+
+pub async fn send_message(socket: &mut TcpStream, message_type: u8, data: &Vec<u8>) -> Result<(), Error> {
+    if data.len() > u16::MAX as usize {
+        return Err(Error::IOError(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Data length exceeds maximum allowed size")));
+    }
+
+    let len_bytes = (data.len() as u16).to_be_bytes();
+
+    let mut header = [0u8; 4];
+    header[0] = 0x01; // Version  
+    header[1] = message_type;
+    header[2] = len_bytes[0];
+    header[3] = len_bytes[1];
+
+    // Send header and data
+    socket.write_all(&header).await?;
+    socket.write_all(data).await?;
+
+    Ok(())
 }

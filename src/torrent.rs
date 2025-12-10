@@ -5,6 +5,7 @@ use log::info;
 use crate::networking;
 
 #[derive(Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct Torrent {
     pub torrent_id: String,
     pub tracker_url: Url,

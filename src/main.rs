@@ -3,8 +3,10 @@ use nibble_torrent_client_hurricaneport::torrent::{Torrent, TrackerMessage};
 use log::{debug, info, warn, error, LevelFilter};
 use simple_logger::SimpleLogger;
 use nibble_torrent_client_hurricaneport::error::Error;
-use std::net::UdpSocket;
-use tokio::sync::mpsc;
+use std::{collections::HashSet, hash::Hash, net::UdpSocket, path::Path, sync::Arc};
+use tokio::{sync::{Semaphore, mpsc}, task::JoinSet};
+use nibble_torrent_client_hurricaneport::{peer,server};
+
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -31,6 +33,10 @@ struct Args {
     #[arg(short, long, default_value_t = false)]
     verbose: bool,
 }
+
+
+
+
 #[tokio::main]
 async fn main() {
     let args = Args::parse(); 
@@ -67,7 +73,36 @@ async fn main() {
         }
     };
 
+    let mut needed_chunks = HashSet::new();
+
+    for i in 0..torrent.pieces.len() {
+        needed_chunks.insert(i as u64);
+    }
+
+    let mut chunk_hashes = Vec::new();
+    for piece_hash in torrent.pieces.iter() {
+        let hash = hex::decode(piece_hash).unwrap().as_slice().try_into().unwrap();
+        chunk_hashes.push(hash);
+    }
+
+    let peer_manager_state = peer::PeerManagerState {
+        peers: Vec::new(),
+        needed_chunks: needed_chunks,
+        chunk_hashes: chunk_hashes,
+        output_file_folder: args.dest.clone(),
+        torrent_id: torrent.torrent_id.clone(),
+        filter: match args.filter {
+            Some(netid) => {vec![netid]},
+            None => Vec::new(),
+        },
+        output_file: args.dest.join(torrent.file_name.clone()),
+
+
+    };
+
     let (tx_tracker, rx_tracker) = tokio::sync::mpsc::channel(32);
+    let torrent_server = torrent.clone();
+    let peer_id_clone = peer_id.clone();
     tokio::spawn( async move {
         if let Err(e) = tracker_task(tx_tracker, torrent, peer_id.clone(), peer_ip.clone(), args.port).await {
             error!("Error in tracker task: {}", e);
@@ -75,8 +110,14 @@ async fn main() {
     });
 
     tokio::spawn( async move {
-        if let Err(e) = peer_manager_task(rx_tracker).await {
+        if let Err(e) = peer::peer_manager_task(rx_tracker, peer_manager_state, &format!("-ECEN426-{}",&args.netid)).await {
             error!("Error in peer manager task: {}", e);
+        }
+    });
+
+    tokio::spawn( async move {
+        if let Err(e) = server::server_task(args.port, args.dest, torrent_server, peer_id_clone).await {
+            error!("Error in server task: {}", e);
         }
     });
 
@@ -98,25 +139,6 @@ async fn tracker_task(tx: mpsc::Sender<TrackerMessage>, torrent: Torrent, peer_i
             }
         }
         tokio::time::sleep(std::time::Duration::from_secs(interval)).await;  
-    }
-}
-
-async fn peer_manager_task(mut rx: mpsc::Receiver<TrackerMessage>) -> Result<(), Error> {
-    let mut peer_list: Vec<[String; 2]> = Vec::new();
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-
-    loop {
-        tokio::select! {
-            Some(message) = rx.recv() => {
-                let TrackerMessage::UpdatedPeerList(peers) = message;
-                peer_list = peers;
-                info!("Updated peer list with {} peers", peer_list.len());
-            },
-
-            _ = interval.tick() => {
-                info!("Current peer list has {} peers", peer_list.len());
-            },
-        }
     }
 }
 
