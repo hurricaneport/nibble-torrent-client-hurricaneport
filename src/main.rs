@@ -18,7 +18,7 @@ struct Args {
     torrent_file: std::path::PathBuf,
 
     /// The port to receive peer connections from.
-    #[arg(short, long)]
+    #[arg(short, long, default_value_t = 8088)]
     port: u16,
 
     /// The folder to download to and seed from.
